@@ -1,6 +1,6 @@
 # PRML: Comparative Study of KNN and Weighted KNN
 
-This project presents a comparative analysis of standard K-Nearest Neighbors (KNN) and inverse-distance-weighted KNN using the Palmer Penguins dataset. The study investigates whether distance-weighted voting improves classification accuracy and under what conditions such improvements manifest.
+This project presents a comparative analysis of standard K-Nearest Neighbors (KNN) and inverse-distance-weighted KNN using the Palmer Penguins dataset. The study investigates whether distance-weighted voting improves classification accuracy and under what conditions such improvements manifest!
 
 ## Project Overview
 The core objective is to perform a multi-class classification to predict the species of penguins (Adelie, Chinstrap, or Gentoo) based on four continuous morphological measurements: bill length, bill width, flipper length, and body mass.
