@@ -1,0 +1,16 @@
+# Core
+numpy
+pandas
+seaborn
+matplotlib
+
+# Jupyter
+jupyter
+ipykernel
+
+# Notebook version control
+jupytext
+nbstripout
+
+# Dev tooling
+pre-commit

@@ -1,0 +1,13 @@
+repos:
+- repo: local
+  hooks:
+  - id: jupytext-sync
+    name: Jupytext Sync
+    entry: python -m jupytext --sync
+    language: system
+    files: \.ipynb$
+  - id: nbstripout
+    name: nbstripout
+    entry: python -m nbstripout
+    language: system
+    files: \.ipynb$
