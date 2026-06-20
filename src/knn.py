@@ -2,40 +2,43 @@
 knn.py
 ------
 Baseline k-Nearest Neighbours classifier, implemented from scratch with
-NumPy only.
+NumPy only. Distance computation is delegated to the single shared
+vectorised utility in distance.py, so the baseline and the (forthcoming)
+weighted-kNN extension use exactly the same distance routine.
 
 Supports multi-class targets (e.g. the 3 Palmer Penguins species), encoded
 as integer labels 0..C-1.
 
 Exposes:
-    euclidean_distance(x1, x2)         -- shared distance utility
     knn_predict_point(X_train, y_train, x_query, k)
     knn_predict(X_train, y_train, X_test, k)
 """
 
 import numpy as np
 
-
-def euclidean_distance(x1, x2):
-    """
-    Euclidean (L2) distance between two 1D vectors.
-
-    d(x1, x2) = sqrt( sum_i (x1_i - x2_i)^2 )
-    """
-    x1 = np.asarray(x1, dtype=float)
-    x2 = np.asarray(x2, dtype=float)
-    return np.sqrt(np.sum((x1 - x2) ** 2))
+from distance import euclidean_distance_matrix
 
 
-def knn_predict_point(X_train, y_train, x_query, k=5):
+def knn_predict_point(X_train, y_train, x_query, k=5, distances=None):
     """
     Predict the class of a single query point using majority-vote kNN.
 
     Steps:
-      1. Compute the Euclidean distance from x_query to every training point.
+      1. Take the (precomputed, or freshly computed) Euclidean distance
+         from x_query to every training point.
       2. Sort distances and take the indices of the k closest points.
       3. Count class votes among those k neighbours.
       4. Return the majority class.
+
+    Parameters
+    ----------
+    X_train, y_train : training data / labels
+    x_query : single query point, shape (n_features,)
+    k : number of neighbours
+    distances : optional precomputed 1D array of distances from x_query to
+        every row of X_train (shape (n_train,)). Passed in by knn_predict
+        when scoring a whole test set, so the pairwise distance matrix is
+        computed once (vectorised) rather than once per query point.
 
     Tie-breaking rule
     ------------------
@@ -53,8 +56,11 @@ def knn_predict_point(X_train, y_train, x_query, k=5):
     y_train = np.asarray(y_train)
     x_query = np.asarray(x_query, dtype=float)
 
-    # 1. distance to every training point
-    distances = np.array([euclidean_distance(x, x_query) for x in X_train])
+    # 1. distance to every training point (vectorised, shared utility)
+    if distances is None:
+        distances = euclidean_distance_matrix(
+            x_query.reshape(1, -1), X_train
+        )[0]
 
     # 2. indices of the k nearest neighbours
     nn_idx = np.argsort(distances)[:k]
@@ -86,6 +92,11 @@ def knn_predict(X_train, y_train, X_test, k=5):
     """
     Predict classes for an entire test set.
 
+    The pairwise distance matrix between X_test and X_train is computed
+    once, vectorised, via the shared euclidean_distance_matrix utility;
+    each test point's row is then handed to knn_predict_point for voting
+    and tie-breaking.
+
     Parameters
     ----------
     X_train : array-like, shape (n_train, n_features)
@@ -97,7 +108,12 @@ def knn_predict(X_train, y_train, X_test, k=5):
     -------
     np.ndarray, shape (n_test,) -- predicted integer class labels
     """
+    X_train = np.asarray(X_train, dtype=float)
     X_test = np.asarray(X_test, dtype=float)
-    return np.array(
-        [knn_predict_point(X_train, y_train, x, k=k) for x in X_test]
-    )
+
+    dist_matrix = euclidean_distance_matrix(X_test, X_train)  # (n_test, n_train)
+
+    return np.array([
+        knn_predict_point(X_train, y_train, X_test[i], k=k, distances=dist_matrix[i])
+        for i in range(X_test.shape[0])
+    ])
