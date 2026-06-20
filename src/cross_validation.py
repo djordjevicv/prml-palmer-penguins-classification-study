@@ -95,8 +95,8 @@ def cross_validate(X, y, k_values, method, n_folds=5, random_seed=42, verbose=Fa
             y_train, y_val = y[train_idx], y[val_idx]
 
             scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)   # fit on train fold(s) only
-            X_val_scaled = scaler.transform(X_val)            # apply same stats to val fold
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_val_scaled = scaler.transform(X_val)
 
             y_pred = method(X_train_scaled, y_train, X_val_scaled, k)
             fold_accuracies.append(float(np.mean(y_pred == y_val)))
