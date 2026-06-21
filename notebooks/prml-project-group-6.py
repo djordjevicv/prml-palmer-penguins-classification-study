@@ -103,7 +103,7 @@ np.save("../data/X.npy", X.values)
 np.save("../data/y.npy", y_encoded.values)
 
 # %% [markdown]
-# ## 3. Exploratory Data Analysis
+# ##  Exploratory Data Analysis
 #
 # We explore the cleaned dataset (`df_eda`) before modeling: summary statistics, class balance, feature correlations, distributions by species, a from-scratch PCA projection, and outlier inspection via z-scores. Figures are saved to `../figures`.
 
@@ -254,3 +254,125 @@ outliers
 
 # %% [markdown]
 # **Decision on flagged outliers.** No samples exceeded |z| > 3 on any of the four features, indicating no extreme outliers in the cleaned dataset. No additional rows were removed beyond the missing-value cleaning already performed.
+
+# %% [markdown]
+# ## Hyperparameter Search: Choosing k via Cross-Validation
+#
+# Before evaluating on the held-out test set, we tune `k` for both classic kNN and weighted kNN
+# using the generalised `cross_validate(X, y, k_values, method)`. We sweep `k = 1...20` for both methods, record the mean CV accuracy
+# per `k`, and select the optimal `k` for each method to be used in all subsequent test-set
+# evaluations.
+#
+# **Tie-breaking rule:** if multiple `k` values tie for the best mean CV accuracy (compared after
+# rounding to 6 decimal places, to ignore floating-point noise), the **smallest `k`** is selected, favouring the simpler, less variance-prone model.
+
+# %%
+import sys
+sys.path.append("../src")
+
+from cross_validation import cross_validate
+from knn import knn_predict, weighted_knn_predict
+
+K_MIN = 1
+K_MAX = 20          # search k = 1...20 (sqrt(n_train) ~ 16, so this comfortably covers it)
+N_FOLDS = 5
+RANDOM_SEED = 42
+ROUND_DECIMALS = 6   # precision used when checking for ties in mean accuracy
+
+METHODS = {
+    "knn": knn_predict,
+    "weighted_knn": weighted_knn_predict,
+}
+
+X = np.load("../data/X.npy")
+y = np.load("../data/y.npy")
+
+
+# %% [markdown]
+# **Running the search.** `run_search` calls `cross_validate` once per method over `k = 1...20`
+# and reshapes the results into a tidy, plottable DataFrame.
+
+# %%
+def run_search(X, y, k_values=range(K_MIN, K_MAX + 1), methods=METHODS,
+                n_folds=N_FOLDS, random_seed=RANDOM_SEED, verbose=True):
+    raw_results = {}
+
+    for name, method_fn in methods.items():
+        raw_results[name] = cross_validate(
+            X, y, k_values, method=method_fn,
+            n_folds=n_folds, random_seed=random_seed, verbose=verbose,
+        )
+
+    rows = []
+    for method_name, per_k in raw_results.items():
+        for k, stats in per_k.items():
+            rows.append({
+                "method": method_name,
+                "k": k,
+                "mean_accuracy": stats["mean_accuracy"],
+                "std_accuracy": stats["std_accuracy"],
+            })
+    results_df = pd.DataFrame(rows)
+    return results_df
+
+results_df = run_search(X, y)   
+
+
+# %% [markdown]
+# **Selecting the optimal k.** `select_optimal_k` finds the best mean CV accuracy for a given
+# method and applies the explicit tie-breaking rule (smallest `k` among ties), so the result is
+# deterministic and reproducible.
+
+# %%
+def select_optimal_k_simple(results_df, method_name, round_decimals=6):
+    rows = results_df[results_df["method"] == method_name]
+    candidates = list(zip(rows["k"], rows["mean_accuracy"], rows["std_accuracy"]))
+
+    best_acc = max(round(acc, round_decimals) for k, acc, std in candidates)
+
+    
+    tied = [(k, acc, std) for k, acc, std in candidates if round(acc, round_decimals) == best_acc]
+
+    
+    best_k, best_acc_real, best_std = min(tied, key=lambda row: row[0])
+
+    return {"method": method_name, "optimal_k": int(best_k),
+            "mean_accuracy": float(best_acc_real), "std_accuracy": float(best_std)}
+
+# %%
+optimal_results = [select_optimal_k_simple(results_df, name) for name in METHODS]
+optimal_df = pd.DataFrame(optimal_results)
+
+print("\n=== Optimal k per method (tie-break: smallest k) ===")
+optimal_df
+
+# %% [markdown]
+# **Accuracy vs k, both methods.** Visualising the full sweep alongside the selected optimum makes
+# it easy to see how sensitive each method is to `k`, and whether the chosen `k` sits in a flat,
+# stable region of the curve or a sharp, noise-driven peak.
+
+# %%
+fig, ax = plt.subplots(figsize=(8, 5))
+
+for name in METHODS:
+    sub = results_df[results_df["method"] == name]
+    ax.plot(sub["k"], sub["mean_accuracy"], marker="o", label=name)
+
+ax.set_xlabel("k")
+ax.set_ylabel("Mean CV accuracy")
+ax.set_title("Cross-validation accuracy vs k")
+ax.legend()
+plt.savefig("../figures/cv_accuracy_vs_k.png", dpi=150)
+plt.show()
+
+# %% [markdown]
+# **Saving results for later use.** The full per-k results and the selected optimal `k` per method
+# are saved to `data/` so the test-set evaluation stage can load them directly without re-running
+# cross-validation.
+
+# %%
+results_df.to_csv("../data/cv_results_long.csv", index=False)
+optimal_df.to_csv("../data/cv_optimal_k.csv", index=False)
+
+print("Saved: data/cv_results_long.csv (full per-k results), "
+      "data/cv_optimal_k.csv (optimal k per method)")
