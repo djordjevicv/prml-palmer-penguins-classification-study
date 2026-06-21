@@ -36,6 +36,7 @@ import pandas as pd
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import sys
 
 
 # %%
@@ -267,11 +268,10 @@ outliers
 # rounding to 6 decimal places, to ignore floating-point noise), the **smallest `k`** is selected, favouring the simpler, less variance-prone model.
 
 # %%
-import sys
-sys.path.append("../src")
-
 from cross_validation import cross_validate
 from knn import knn_predict, weighted_knn_predict
+
+sys.path.append("../src")
 
 K_MIN = 1
 K_MAX = 20          # search k = 1...20 (sqrt(n_train) ~ 16, so this comfortably covers it)
@@ -279,10 +279,7 @@ N_FOLDS = 5
 RANDOM_SEED = 42
 ROUND_DECIMALS = 6   # precision used when checking for ties in mean accuracy
 
-METHODS = {
-    "knn": knn_predict,
-    "weighted_knn": weighted_knn_predict,
-}
+METHODS = {"knn": knn_predict, "weighted_knn": weighted_knn_predict}
 
 X = np.load("../data/X.npy")
 y = np.load("../data/y.npy")
@@ -293,15 +290,13 @@ y = np.load("../data/y.npy")
 # and reshapes the results into a tidy, plottable DataFrame.
 
 # %%
-def run_search(X, y, k_values=range(K_MIN, K_MAX + 1), methods=METHODS,
-                n_folds=N_FOLDS, random_seed=RANDOM_SEED, verbose=True):
+def run_search(X, y, k_values=range(K_MIN, K_MAX + 1), methods=METHODS, n_folds=N_FOLDS, random_seed=RANDOM_SEED, verbose=True):
     raw_results = {}
 
     for name, method_fn in methods.items():
-        raw_results[name] = cross_validate(
-            X, y, k_values, method=method_fn,
-            n_folds=n_folds, random_seed=random_seed, verbose=verbose,
-        )
+        if verbose:
+            print(f"\n=== {name} ===")
+        raw_results[name] = cross_validate(X, y, k_values, method=method_fn, n_folds=n_folds, random_seed=random_seed, verbose=verbose)
 
     rows = []
     for method_name, per_k in raw_results.items():
@@ -310,12 +305,12 @@ def run_search(X, y, k_values=range(K_MIN, K_MAX + 1), methods=METHODS,
                 "method": method_name,
                 "k": k,
                 "mean_accuracy": stats["mean_accuracy"],
-                "std_accuracy": stats["std_accuracy"],
+                "std_accuracy": stats["std_accuracy"]
             })
     results_df = pd.DataFrame(rows)
-    return results_df
+    return results_df  
 
-results_df = run_search(X, y)   
+results_df = run_search(X, y)
 
 
 # %% [markdown]
