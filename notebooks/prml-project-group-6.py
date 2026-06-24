@@ -268,10 +268,10 @@ outliers
 # rounding to 6 decimal places, to ignore floating-point noise), the **smallest `k`** is selected, favouring the simpler, less variance-prone model.
 
 # %%
+sys.path.append("../src")
+
 from cross_validation import cross_validate
 from knn import knn_predict, weighted_knn_predict
-
-sys.path.append("../src")
 
 K_MIN = 1
 K_MAX = 20          # search k = 1...20 (sqrt(n_train) ~ 16, so this comfortably covers it)
@@ -347,16 +347,28 @@ optimal_df
 # stable region of the curve or a sharp, noise-driven peak.
 
 # %%
-fig, ax = plt.subplots(figsize=(8, 5))
+results_df = pd.read_csv("../data/cv_results_long.csv")
 
-for name in METHODS:
-    sub = results_df[results_df["method"] == name]
-    ax.plot(sub["k"], sub["mean_accuracy"], marker="o", label=name)
+fig, ax = plt.subplots(figsize=(8, 5))
+for method, color, label in zip(
+    ["knn", "weighted_knn"],
+    ["tab:blue", "tab:orange"],
+    ["kNN", "Weighted kNN"],
+):
+    sub = results_df[results_df["method"] == method]
+    ax.plot(sub["k"], sub["mean_accuracy"], marker="o", color=color, label=label)
+    opt_row = optimal_df[optimal_df["method"] == method]
+    opt_k   = int(opt_row["optimal_k"].values[0])
+    opt_acc = float(opt_row["mean_accuracy"].values[0])
+    ax.scatter([opt_k], [opt_acc], color=color, s=150, zorder=5,
+               edgecolor="black", label=f"{label} optimal (k={opt_k})")
 
 ax.set_xlabel("k")
-ax.set_ylabel("Mean CV accuracy")
+ax.set_ylabel("Mean CV accuracy (5-fold stratified)")
 ax.set_title("Cross-validation accuracy vs k")
+ax.set_xticks(results_df["k"].unique())
 ax.legend()
+plt.tight_layout()
 plt.savefig("../figures/cv_accuracy_vs_k.png", dpi=150)
 plt.show()
 
@@ -371,3 +383,208 @@ optimal_df.to_csv("../data/cv_optimal_k.csv", index=False)
 
 print("Saved: data/cv_results_long.csv (full per-k results), "
       "data/cv_optimal_k.csv (optimal k per method)")
+
+# %% [markdown]
+# ## Test-Set Evaluation
+#
+# Before evaluating on the held-out test set, we perform a stratified train/test
+# split (80/20, same `random_seed=42` as cross-validation to guarantee no data
+# leakage), standardise using a `StandardScaler` fit on training data only, and
+# load the optimal `k` per method from the cross-validation results saved in previous section.
+
+# %%
+from preprocessing import stratified_train_test_split, StandardScaler
+
+
+LABEL_NAMES = {0: "Adelie", 1: "Chinstrap", 2: "Gentoo"}
+COLORS      = ["tab:blue", "tab:orange", "tab:green"]
+N_CLASSES   = 3
+
+X = np.load("../data/X.npy")
+y = np.load("../data/y.npy")
+
+X_train, X_test, y_train, y_test = stratified_train_test_split(
+    X, y, test_size=0.2, random_seed=42
+)
+
+scaler    = StandardScaler()
+X_train_s = scaler.fit_transform(X_train)
+X_test_s  = scaler.transform(X_test)   # uses train mean/std 
+optimal_df = pd.read_csv("../data/cv_optimal_k.csv")
+k_knn  = int(optimal_df[optimal_df["method"] == "knn"]["optimal_k"].values[0])
+k_wknn = int(optimal_df[optimal_df["method"] == "weighted_knn"]["optimal_k"].values[0])
+
+print(f"Optimal k  —  kNN: {k_knn},  Weighted kNN: {k_wknn}")
+
+y_pred_knn  = knn_predict(X_train_s, y_train, X_test_s, k=k_knn)
+y_pred_wknn = weighted_knn_predict(X_train_s, y_train, X_test_s, k=k_wknn)
+
+
+# %% [markdown]
+# ### Accuracy, Precision, Recall, F1
+#
+# We compute all metrics from scratch using the confusion matrix. Macro-averaging
+# treats each class equally regardless of size, which is appropriate given the
+# moderate class imbalance noted in some previous section.
+
+# %%
+def confusion_matrix_scratch(y_true, y_pred, n_classes):
+    cm = np.zeros((n_classes, n_classes), dtype=int)
+    for t, p in zip(y_true, y_pred):
+        cm[t, p] += 1
+    return cm
+
+
+def precision_recall_f1(y_true, y_pred, n_classes):
+    cm = confusion_matrix_scratch(y_true, y_pred, n_classes)
+    per_class = {}
+    for c in range(n_classes):
+        tp   = cm[c, c]
+        fp   = cm[:, c].sum() - tp
+        fn   = cm[c, :].sum() - tp
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+        per_class[c] = {"precision": prec, "recall": rec, "f1": f1}
+    macro = {m: float(np.mean([per_class[c][m] for c in range(n_classes)]))
+             for m in ["precision", "recall", "f1"]}
+    return cm, per_class, macro
+
+
+cm_knn,  per_knn,  macro_knn  = precision_recall_f1(y_test, y_pred_knn,  N_CLASSES)
+cm_wknn, per_wknn, macro_wknn = precision_recall_f1(y_test, y_pred_wknn, N_CLASSES)
+
+acc_knn  = float(np.mean(y_pred_knn  == y_test))
+acc_wknn = float(np.mean(y_pred_wknn == y_test))
+
+rows = []
+for c in range(N_CLASSES):
+    rows.append({
+        "class":          LABEL_NAMES[c],
+        "knn_precision":  round(per_knn[c]["precision"],  4),
+        "knn_recall":     round(per_knn[c]["recall"],     4),
+        "knn_f1":         round(per_knn[c]["f1"],         4),
+        "wknn_precision": round(per_wknn[c]["precision"], 4),
+        "wknn_recall":    round(per_wknn[c]["recall"],    4),
+        "wknn_f1":        round(per_wknn[c]["f1"],        4),
+    })
+rows.append({
+    "class":          "macro",
+    "knn_precision":  round(macro_knn["precision"],  4),
+    "knn_recall":     round(macro_knn["recall"],     4),
+    "knn_f1":         round(macro_knn["f1"],         4),
+    "wknn_precision": round(macro_wknn["precision"], 4),
+    "wknn_recall":    round(macro_wknn["recall"],    4),
+    "wknn_f1":        round(macro_wknn["f1"],        4),
+})
+
+metrics_df = pd.DataFrame(rows).set_index("class")
+print(f"Test accuracy  —  kNN: {acc_knn:.4f},  Weighted kNN: {acc_wknn:.4f}\n")
+metrics_df
+
+# %% [markdown]
+# ### Confusion Matrices
+
+# %%
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+labels = [LABEL_NAMES[c] for c in range(N_CLASSES)]
+
+for ax, cm, title in zip(
+    axes,
+    [cm_knn, cm_wknn],
+    [f"kNN (k={k_knn})", f"Weighted kNN (k={k_wknn})"],
+):
+    im = ax.imshow(cm, cmap="Blues")
+    ax.set_xticks(range(N_CLASSES)); ax.set_xticklabels(labels, rotation=30, ha="right")
+    ax.set_yticks(range(N_CLASSES)); ax.set_yticklabels(labels)
+    ax.set_xlabel("Predicted"); ax.set_ylabel("True")
+    ax.set_title(title)
+    for i in range(N_CLASSES):
+        for j in range(N_CLASSES):
+            ax.text(j, i, str(cm[i, j]), ha="center", va="center", fontsize=13,
+                    color="white" if cm[i, j] > cm.max() / 2 else "black")
+
+plt.colorbar(im, ax=axes[-1])
+plt.tight_layout()
+plt.savefig("../figures/confusion_matrices.png", dpi=150)
+plt.show()
+
+# %% [markdown]
+# Both confusion matrices are identical: both methods correctly classify all 67
+# test points at `k = 4`. The diagonal entries confirm perfect per-class recall
+# for all three species.
+
+# %% [markdown]
+# ### Decision Boundaries on PCA Projection
+#
+# **Note:** boundaries are trained on the first two PCA components only (not the
+# full 4-D feature space) — included for visual illustration, not as a
+# performance measure.
+
+# %%
+cov     = (X_train_s.T @ X_train_s) / X_train_s.shape[0]
+eigvals, eigvecs = np.linalg.eigh(cov)
+eigvecs = eigvecs[:, np.argsort(eigvals)[::-1]]
+W       = eigvecs[:, :2]
+
+X_train_pca = X_train_s @ W
+explained   = np.sort(eigvals)[::-1] / eigvals.sum()
+
+margin = 0.5
+x_min, x_max = X_train_pca[:, 0].min() - margin, X_train_pca[:, 0].max() + margin
+y_min, y_max = X_train_pca[:, 1].min() - margin, X_train_pca[:, 1].max() + margin
+xx, yy = np.meshgrid(np.linspace(x_min, x_max, 150),
+                     np.linspace(y_min, y_max, 150))
+grid_pca = np.c_[xx.ravel(), yy.ravel()]
+
+Z_knn  = knn_predict(X_train_pca, y_train, grid_pca, k=k_knn).reshape(xx.shape)
+Z_wknn = weighted_knn_predict(X_train_pca, y_train, grid_pca, k=k_wknn).reshape(xx.shape)
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+for ax, Z, title in zip(
+    axes,
+    [Z_knn, Z_wknn],
+    [f"kNN (k={k_knn})", f"Weighted kNN (k={k_wknn})"],
+):
+    ax.contourf(xx, yy, Z, alpha=0.25, levels=[-0.5, 0.5, 1.5, 2.5], colors=COLORS)
+    ax.contour(xx, yy, Z, levels=[0.5, 1.5], colors="gray", linewidths=0.8, linestyles="--")
+    for c, color in enumerate(COLORS):
+        mask = y_train == c
+        ax.scatter(X_train_pca[mask, 0], X_train_pca[mask, 1],
+                   color=color, alpha=0.6, s=30, label=LABEL_NAMES[c])
+    ax.set_xlabel(f"PC1 ({explained[0]*100:.1f}%)")
+    ax.set_ylabel(f"PC2 ({explained[1]*100:.1f}%)")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+
+plt.tight_layout()
+plt.savefig("../figures/decision_boundaries_pca.png", dpi=150)
+plt.show()
+
+# %% [markdown]
+# ### Disagreement Analysis
+#
+# We check where the two methods give different predictions on the test set.
+
+# %%
+disagree_mask = y_pred_knn != y_pred_wknn
+n_disagree    = int(disagree_mask.sum())
+
+print(f"Test set size : {len(y_test)}")
+print(f"Disagreements : {n_disagree}  ({n_disagree / len(y_test) * 100:.1f}%)")
+
+if n_disagree > 0:
+    disagree_df = pd.DataFrame({
+        "true_label": [LABEL_NAMES[c] for c in y_test[disagree_mask]],
+        "knn_pred":   [LABEL_NAMES[c] for c in y_pred_knn[disagree_mask]],
+        "wknn_pred":  [LABEL_NAMES[c] for c in y_pred_wknn[disagree_mask]],
+    })
+    disagree_df
+
+# %% [markdown]
+# Both methods agree on every test point at `k = 4`. This is consistent with the
+# EDA findings: Gentoo is clearly separable on flipper length and
+# body mass, and while Adelie/Chinstrap overlap on bill depth, the four nearest
+# neighbours at `k = 4` are unambiguous enough that both voting schemes reach the
+# same decision. The low CV standard deviation (0.006) confirms the result is
+# stable across all five folds, not a lucky split.
