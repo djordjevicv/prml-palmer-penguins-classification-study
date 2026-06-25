@@ -8,7 +8,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.3
 #   kernelspec:
-#     display_name: .venv (3.14.3.final.0)
+#     display_name: .venv (3.14.0.final.0)
 #     language: python
 #     name: python3
 # ---
@@ -29,14 +29,25 @@
 # | 144m/25 | Vojin Đorđević |
 
 # %% [markdown]
-# **Imports and data loading.** We use `pandas` for loading and manipulating the tabular dataset, `os` for file system operations, and `numpy` for saving the final feature/label arrays. `load_penguins_data` fetches the Palmer Penguins dataset from a public CSV source and we save an untouched raw copy to `../data/raw/penguins_.csv` before any cleaning.
+# ## Imports and Configuration
+#
+# All third-party imports live here. `sys.path` is extended so the `src/`
+# modules (`knn`, `preprocessing`, `cross_validation`) are importable from
+# anywhere inside `notebooks/`.
 
 # %%
-import pandas as pd
 import os
-import numpy as np
-import matplotlib.pyplot as plt
 import sys
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+sys.path.insert(0, "../src")
+
+from cross_validation import cross_validate
+from knn import knn_predict, weighted_knn_predict
+from preprocessing import StandardScaler, stratified_train_test_split
 
 
 # %%
@@ -52,22 +63,16 @@ df = load_penguins_data()
 df.to_csv("../data/raw/penguins_.csv", index=False)
 
 # %% [markdown]
-# **Inspecting the raw data.** We preview the first rows to check column names and types, count missing values per column, and look at the rows/indices where values are missing, to decide how to handle them.
+# **Inspecting the raw data.** We preview the first rows to check column names and types, count missing values per column, and look at the affected rows to decide how to handle them.
 
 # %%
 df.head()
 
 # %%
-missing_counts = df.isnull().sum().to_frame(name="missing_count")
-missing_counts
+df.isnull().sum().to_frame(name="missing_count")
 
 # %%
-rows_with_missing = df[df.isnull().any(axis=1)]
-rows_with_missing
-
-# %%
-missing_indices = df[df.isnull().any(axis=1)].index
-missing_indices 
+df[df.isnull().any(axis=1)]
 
 # %% [markdown]
 # **Cleaning the data.** Since missing entries are a small fraction of the dataset, we drop them with `dropna()` rather than imputing, producing `df_clean`. Shapes before/after are printed to quantify how much data was lost.
@@ -79,39 +84,32 @@ print("Before:", df.shape)
 print("After:", df_clean.shape)
 
 # %% [markdown]
-# **Feature/target preparation and saving.** We select the four numeric measurements (bill length, bill depth, flipper length, body mass) as features `X`, and species as the target. Species names are mapped to integers $\{0,1,2\}$ to produce `y_encoded`, while `df_eda` is kept as an independent copy for later exploratory analysis. Finally, the cleaned dataset and feature/label arrays are saved to disk for use in subsequent notebook stages.
+# **Feature/target preparation and saving.** We select the four numeric measurements (bill length, bill depth, flipper length, body mass) as features `X`, and species as the target. Species names are mapped to integers $\{0,1,2\}$ to produce `y`, while `df_eda` is kept as an independent copy for later exploratory analysis. The cleaned dataset and feature/label arrays are saved to disk.
 
 # %%
-X = df_clean[[ "bill_length_mm", "bill_depth_mm", "flipper_length_mm", "body_mass_g"]]
-y = df_clean["species"]
+feature_cols = ["bill_length_mm", "bill_depth_mm", "flipper_length_mm", "body_mass_g"]
+label_map    = {"Adelie": 0, "Chinstrap": 1, "Gentoo": 2}
 
-# %%
-label_map = {
-    "Adelie": 0,
-    "Chinstrap": 1,
-    "Gentoo": 2
-}
+X = df_clean[feature_cols].to_numpy(dtype=float)
+y = df_clean["species"].map(label_map).to_numpy(dtype=int)
 
-y_encoded = y.map(label_map)
+df_eda = df_clean.copy()
 
-df_eda = df_clean.copy()  # separate dataset for EDA (kept independent from modeling data)
-
-# %%
-os.makedirs("../data", exist_ok=True)
-
+np.save("../data/X.npy", X)
+np.save("../data/y.npy", y)
 df_clean.to_csv("../data/penguins_clean.csv", index=False)
-np.save("../data/X.npy", X.values)
-np.save("../data/y.npy", y_encoded.values)
+
+print(f"X shape: {X.shape}  —  classes: {np.unique(y)}")
+
+# %%
+# EDA setup — feature_cols no longer here, already defined above
+species_list = sorted(df_eda["species"].unique())
+colors = {"Adelie": "tab:blue", "Chinstrap": "tab:orange", "Gentoo": "tab:green"}
 
 # %% [markdown]
 # ##  Exploratory Data Analysis
 #
 # We explore the cleaned dataset (`df_eda`) before modeling: summary statistics, class balance, feature correlations, distributions by species, a from-scratch PCA projection, and outlier inspection via z-scores. Figures are saved to `../figures`.
-
-# %%
-feature_cols = ["bill_length_mm", "bill_depth_mm", "flipper_length_mm", "body_mass_g"]
-species_list = sorted(df_eda["species"].unique())
-colors = {"Adelie": "tab:blue", "Chinstrap": "tab:orange", "Gentoo": "tab:green"}
 
 # %% [markdown]
 # **Summary statistics by species.** We compute mean, standard deviation, min, and max for each of the four numeric features, grouped by species, to get a quantitative sense of how the species differ before any modeling.
@@ -145,34 +143,32 @@ print(f"\nImbalance ratio (largest/smallest class): {imbalance_ratio:.2f}")
 # **Note on class imbalance.** The dataset shows moderate class imbalance — Adelie (146 samples) has roughly 2.15× more samples than Chinstrap (68 samples), with Gentoo (119 samples) in between. This is accounted for during model evaluation, where overall accuracy alone may be misleading and per-class metrics (e.g., precision/recall) are also reported.
 
 # %% [markdown]
-# **Correlation heatmap.** We compute the pairwise Pearson correlation among the four numeric features to identify redundant or strongly related measurements, which is relevant both for interpreting the data and for understanding what PCA will later capture.
+# ### Correlation Heatmap
+#
+# Pairwise Pearson correlations among the four features identify redundant
+# measurements and hint at what variance the first principal component will
+# capture.
 
 # %%
-def correlation_matrix(X):
-    n_features = X.shape[1]
-    corr = np.zeros((n_features, n_features))
-    
-    means = X.mean(axis=0)
-    stds = X.std(axis=0)
-    
-    for i in range(n_features):
-        for j in range(n_features):
-            cov_ij = np.mean((X[:, i] - means[i]) * (X[:, j] - means[j]))
-            corr[i, j] = cov_ij / (stds[i] * stds[j])
-    
-    return corr
+def correlation_matrix(X_arr):
+    n = X_arr.shape[0]
+    centered = X_arr - X_arr.mean(axis=0)
+    std = X_arr.std(axis=0)
+    std = np.where(std == 0.0, 1.0, std)
+    cov = (centered.T @ centered) / n
+    return cov / np.outer(std, std)
 
-X_features = df_eda[feature_cols].values
-corr_array = correlation_matrix(X_features)
 
-corr_matrix = pd.DataFrame(corr_array, index=feature_cols, columns=feature_cols).round(2)
-corr_matrix
+X_eda = df_eda[feature_cols].to_numpy(dtype=float)
+corr_arr = correlation_matrix(X_eda)
+corr_df  = pd.DataFrame(corr_arr, index=feature_cols, columns=feature_cols).round(2)
 
-# %%
-corr_no_diag = corr_matrix.where(~np.eye(len(corr_matrix), dtype=bool))
-strongest = corr_no_diag.abs().unstack().idxmax()
-strongest_val = corr_matrix.loc[strongest]
-print(f"Strongest correlation: {strongest[0]} vs {strongest[1]} (r = {strongest_val:.2f})")
+corr_no_diag = corr_df.where(~np.eye(len(corr_df), dtype=bool))
+strongest    = corr_no_diag.abs().unstack().idxmax()
+print(f"Strongest correlation: {strongest[0]} vs {strongest[1]}"
+      f"  (r = {corr_df.loc[strongest]:.2f})")
+
+corr_df
 
 # %% [markdown]
 # **Interpretation.** The strongest correlation is between flipper_length_mm and body_mass_g (r = 0.87), indicating that larger-bodied penguins tend to have proportionally longer flippers. This strong positive relationship suggests these two features carry overlapping information, which is consistent with the high variance explained by the first principal component in the PCA projection below.
@@ -217,40 +213,40 @@ plt.show()
 # **PCA projection.** We standardize the four features (zero mean, unit variance) and project them onto the first two principal components, to visualize class separability in 2D before modeling. We also report the explained variance ratio of each component.
 
 # %%
-X = df_eda[feature_cols].values
-X_scaled = (X - X.mean(axis=0)) / X.std(axis=0)
+X_eda_scaled = (X_eda - X_eda.mean(axis=0)) / X_eda.std(axis=0)
 
-cov_matrix = (X_scaled.T @ X_scaled) / X_scaled.shape[0]
-eigvals, eigvecs = np.linalg.eigh(cov_matrix)
-idx = np.argsort(eigvals)[::-1]
-eigvals, eigvecs = eigvals[idx], eigvecs[:, idx]
+cov_matrix           = (X_eda_scaled.T @ X_eda_scaled) / X_eda_scaled.shape[0]
+eigvals, eigvecs     = np.linalg.eigh(cov_matrix)
+idx                  = np.argsort(eigvals)[::-1]
+eigvals, eigvecs     = eigvals[idx], eigvecs[:, idx]
 
-X_pca = X_scaled @ eigvecs[:, :2]
+X_pca        = X_eda_scaled @ eigvecs[:, :2]
 explained_var = eigvals / eigvals.sum()
 
-plt.figure(figsize=(6, 5))
+fig, ax = plt.subplots(figsize=(6, 5))
 for s, c in colors.items():
-    mask = (df_eda["species"] == s).values
-    plt.scatter(X_pca[mask, 0], X_pca[mask, 1], label=s, color=c, alpha=0.7)
-
-plt.xlabel(f"PC1 ({explained_var[0]*100:.1f}%)")
-plt.ylabel(f"PC2 ({explained_var[1]*100:.1f}%)")
-plt.title("PCA projection")
-plt.legend()
+    mask = (df_eda["species"] == s).to_numpy()
+    ax.scatter(X_pca[mask, 0], X_pca[mask, 1], label=s, color=c, alpha=0.7, s=20)
+ax.set_xlabel(f"PC1 ({explained_var[0] * 100:.1f} %)")
+ax.set_ylabel(f"PC2 ({explained_var[1] * 100:.1f} %)")
+ax.set_title("PCA projection (EDA)")
+ax.legend()
 plt.tight_layout()
 plt.savefig("../figures/pca_projection.png", dpi=150)
 plt.show()
 
-print("Explained variance ratio:", explained_var[:2])
+print(f"Explained variance — PC1: {explained_var[0]:.3f}, PC2: {explained_var[1]:.3f}, "
+      f"cumulative: {explained_var[:2].sum():.3f}")
 
 # %% [markdown]
 # **Outlier inspection via z-scores.** We compute per-feature z-scores on the standardized data and flag any sample with |z| > 3 on at least one feature as a potential outlier. We list the flagged rows and record an explicit decision on whether to keep or remove them.
 
 # %%
-z_scores = pd.DataFrame(X_scaled, columns=feature_cols, index=df_eda.index)
-outliers = df_eda[(z_scores.abs() > 3).any(axis=1)]
+z_arr    = np.abs((X_eda - X_eda.mean(axis=0)) / X_eda.std(axis=0))
+z_scores = pd.DataFrame(z_arr, columns=feature_cols, index=df_eda.index)
+outliers = df_eda[(z_scores > 3).any(axis=1)]
 
-print(f"Flagged outliers (|z| > 3): {len(outliers)}")
+print(f"Flagged outliers (|z| > 3 on any feature): {len(outliers)}")
 outliers
 
 # %% [markdown]
@@ -268,49 +264,43 @@ outliers
 # rounding to 6 decimal places, to ignore floating-point noise), the **smallest `k`** is selected, favouring the simpler, less variance-prone model.
 
 # %%
-sys.path.append("../src")
-
-from cross_validation import cross_validate
-from knn import knn_predict, weighted_knn_predict
-
-K_MIN = 1
-K_MAX = 20          # search k = 1...20 (sqrt(n_train) ~ 16, so this comfortably covers it)
-N_FOLDS = 5
-RANDOM_SEED = 42
-ROUND_DECIMALS = 6   # precision used when checking for ties in mean accuracy
-
-METHODS = {"knn": knn_predict, "weighted_knn": weighted_knn_predict}
-
 X = np.load("../data/X.npy")
 y = np.load("../data/y.npy")
 
+K_MIN         = 1
+K_MAX         = 20      # √(n_train) ≈ 16 for 80/20 split, so 20 comfortably covers the range
+N_FOLDS       = 5
+RANDOM_SEED   = 42
+ROUND_DECIMALS = 6
+
+METHODS = {"knn": knn_predict, "weighted_knn": weighted_knn_predict}
+
 
 # %% [markdown]
-# **Running the search.** `run_search` calls `cross_validate` once per method over `k = 1...20`
-# and reshapes the results into a tidy, plottable DataFrame.
+# **Running the sweep.** `run_cv_sweep` calls `cross_validate` once per method over `k = 1...20` and reshapes the results into a tidy, plottable DataFrame.
 
 # %%
-def run_search(X, y, k_values=range(K_MIN, K_MAX + 1), methods=METHODS, n_folds=N_FOLDS, random_seed=RANDOM_SEED, verbose=True):
-    raw_results = {}
-
-    for name, method_fn in methods.items():
+def run_cv_sweep(X, y, k_values=range(K_MIN, K_MAX + 1),
+                 methods=METHODS, n_folds=N_FOLDS,
+                 random_seed=RANDOM_SEED, verbose=True):
+    raw = {}
+    for name, fn in methods.items():
         if verbose:
             print(f"\n=== {name} ===")
-        raw_results[name] = cross_validate(X, y, k_values, method=method_fn, n_folds=n_folds, random_seed=random_seed, verbose=verbose)
+        raw[name] = cross_validate(X, y, k_values, method=fn,
+                                   n_folds=n_folds, random_seed=random_seed,
+                                   verbose=verbose)
+    rows = [
+        {"method": name, "k": k,
+         "mean_accuracy": stats["mean_accuracy"],
+         "std_accuracy":  stats["std_accuracy"]}
+        for name, per_k in raw.items()
+        for k, stats in per_k.items()
+    ]
+    return pd.DataFrame(rows)
 
-    rows = []
-    for method_name, per_k in raw_results.items():
-        for k, stats in per_k.items():
-            rows.append({
-                "method": method_name,
-                "k": k,
-                "mean_accuracy": stats["mean_accuracy"],
-                "std_accuracy": stats["std_accuracy"]
-            })
-    results_df = pd.DataFrame(rows)
-    return results_df  
 
-results_df = run_search(X, y)
+cv_results = run_cv_sweep(X, y)
 
 
 # %% [markdown]
@@ -319,89 +309,77 @@ results_df = run_search(X, y)
 # deterministic and reproducible.
 
 # %%
-def select_optimal_k_simple(results_df, method_name, round_decimals=6):
-    rows = results_df[results_df["method"] == method_name]
+def select_optimal_k(results_df, method_name, round_decimals=ROUND_DECIMALS):
+    rows       = results_df[results_df["method"] == method_name]
     candidates = list(zip(rows["k"], rows["mean_accuracy"], rows["std_accuracy"]))
-
-    best_acc = max(round(acc, round_decimals) for k, acc, std in candidates)
-
-    
-    tied = [(k, acc, std) for k, acc, std in candidates if round(acc, round_decimals) == best_acc]
-
-    
-    best_k, best_acc_real, best_std = min(tied, key=lambda row: row[0])
-
+    best_acc   = max(round(acc, round_decimals) for _, acc, _ in candidates)
+    tied       = [(k, acc, std) for k, acc, std in candidates
+                  if round(acc, round_decimals) == best_acc]
+    best_k, best_acc_val, best_std = min(tied, key=lambda t: t[0])
     return {"method": method_name, "optimal_k": int(best_k),
-            "mean_accuracy": float(best_acc_real), "std_accuracy": float(best_std)}
+            "mean_accuracy": float(best_acc_val), "std_accuracy": float(best_std)}
 
-# %%
-optimal_results = [select_optimal_k_simple(results_df, name) for name in METHODS]
-optimal_df = pd.DataFrame(optimal_results)
+
+optimal_rows = [select_optimal_k(cv_results, name) for name in METHODS]
+optimal_df   = pd.DataFrame(optimal_rows)
 
 print("\n=== Optimal k per method (tie-break: smallest k) ===")
 optimal_df
 
 # %% [markdown]
-# **Accuracy vs k, both methods.** Visualising the full sweep alongside the selected optimum makes
-# it easy to see how sensitive each method is to `k`, and whether the chosen `k` sits in a flat,
-# stable region of the curve or a sharp, noise-driven peak.
+# **Saving CV results.** Both files are written to disk *before* the plot so
+# the test-set evaluation section can load them without re-running CV.
 
 # %%
-results_df = pd.read_csv("../data/cv_results_long.csv")
+cv_results.to_csv("../data/cv_results_long.csv", index=False)
+optimal_df.to_csv("../data/cv_optimal_k.csv",    index=False)
+print("Saved: ../data/cv_results_long.csv  and  ../data/cv_optimal_k.csv")
 
+# %% [markdown]
+# ### Accuracy vs k — Both Methods
+#
+# The full sweep alongside the selected optimum shows how sensitive each method
+# is to `k`, and whether the chosen value sits in a flat, stable region or a
+# sharp, noise-driven peak.
+
+# %%
 fig, ax = plt.subplots(figsize=(8, 5))
-for method, color, label in zip(
-    ["knn", "weighted_knn"],
-    ["tab:blue", "tab:orange"],
-    ["kNN", "Weighted kNN"],
-):
-    sub = results_df[results_df["method"] == method]
-    ax.plot(sub["k"], sub["mean_accuracy"], marker="o", color=color, label=label)
-    opt_row = optimal_df[optimal_df["method"] == method]
-    opt_k   = int(opt_row["optimal_k"].values[0])
-    opt_acc = float(opt_row["mean_accuracy"].values[0])
-    ax.scatter([opt_k], [opt_acc], color=color, s=150, zorder=5,
-               edgecolor="black", label=f"{label} optimal (k={opt_k})")
+
+for method, color, label in [
+    ("knn",          "tab:blue",   "kNN"),
+    ("weighted_knn", "tab:orange", "Weighted kNN"),
+]:
+    sub     = cv_results[cv_results["method"] == method]
+    opt_row = optimal_df[optimal_df["method"] == method].iloc[0]
+
+    ax.plot(sub["k"], sub["mean_accuracy"],
+            marker="o", color=color, label=label)
+    ax.fill_between(sub["k"],
+                    sub["mean_accuracy"] - sub["std_accuracy"],
+                    sub["mean_accuracy"] + sub["std_accuracy"],
+                    alpha=0.15, color=color)
+    ax.scatter([opt_row["optimal_k"]], [opt_row["mean_accuracy"]],
+               color=color, s=150, zorder=5, edgecolor="black",
+               label=f"{label} optimal (k={opt_row['optimal_k']})")
 
 ax.set_xlabel("k")
 ax.set_ylabel("Mean CV accuracy (5-fold stratified)")
 ax.set_title("Cross-validation accuracy vs k")
-ax.set_xticks(results_df["k"].unique())
+ax.set_xticks(cv_results["k"].unique())
 ax.legend()
 plt.tight_layout()
 plt.savefig("../figures/cv_accuracy_vs_k.png", dpi=150)
 plt.show()
 
 # %% [markdown]
-# **Saving results for later use.** The full per-k results and the selected optimal `k` per method
-# are saved to `data/` so the test-set evaluation stage can load them directly without re-running
-# cross-validation.
-
-# %%
-results_df.to_csv("../data/cv_results_long.csv", index=False)
-optimal_df.to_csv("../data/cv_optimal_k.csv", index=False)
-
-print("Saved: data/cv_results_long.csv (full per-k results), "
-      "data/cv_optimal_k.csv (optimal k per method)")
-
-# %% [markdown]
 # ## Test-Set Evaluation
 #
-# Before evaluating on the held-out test set, we perform a stratified train/test
-# split (80/20, same `random_seed=42` as cross-validation to guarantee no data
-# leakage), standardise using a `StandardScaler` fit on training data only, and
-# load the optimal `k` per method from the cross-validation results saved in previous section.
+# We perform a single stratified 80/20 split (same `random_seed=42` as cross-validation), standardise using a `StandardScaler` fit on training data only, and evaluate each method at its CV-selected optimal `k`.
 
 # %%
-from preprocessing import stratified_train_test_split, StandardScaler
-
-
 LABEL_NAMES = {0: "Adelie", 1: "Chinstrap", 2: "Gentoo"}
 COLORS      = ["tab:blue", "tab:orange", "tab:green"]
 N_CLASSES   = 3
-
-X = np.load("../data/X.npy")
-y = np.load("../data/y.npy")
 
 X_train, X_test, y_train, y_test = stratified_train_test_split(
     X, y, test_size=0.2, random_seed=42
@@ -409,10 +387,10 @@ X_train, X_test, y_train, y_test = stratified_train_test_split(
 
 scaler    = StandardScaler()
 X_train_s = scaler.fit_transform(X_train)
-X_test_s  = scaler.transform(X_test)   # uses train mean/std 
-optimal_df = pd.read_csv("../data/cv_optimal_k.csv")
-k_knn  = int(optimal_df[optimal_df["method"] == "knn"]["optimal_k"].values[0])
-k_wknn = int(optimal_df[optimal_df["method"] == "weighted_knn"]["optimal_k"].values[0])
+X_test_s  = scaler.transform(X_test)   # uses training mean/std — no leakage
+
+k_knn  = int(optimal_df.loc[optimal_df["method"] == "knn",          "optimal_k"].values[0])
+k_wknn = int(optimal_df.loc[optimal_df["method"] == "weighted_knn", "optimal_k"].values[0])
 
 print(f"Optimal k  —  kNN: {k_knn},  Weighted kNN: {k_wknn}")
 
@@ -423,9 +401,7 @@ y_pred_wknn = weighted_knn_predict(X_train_s, y_train, X_test_s, k=k_wknn)
 # %% [markdown]
 # ### Accuracy, Precision, Recall, F1
 #
-# We compute all metrics from scratch using the confusion matrix. Macro-averaging
-# treats each class equally regardless of size, which is appropriate given the
-# moderate class imbalance noted in some previous section.
+# We compute all metrics from scratch using the confusion matrix. Macro-averaging treats each class equally regardless of size, which is appropriate given the moderate class imbalance noted in the EDA.
 
 # %%
 def confusion_matrix_scratch(y_true, y_pred, n_classes):
@@ -588,3 +564,91 @@ if n_disagree > 0:
 # neighbours at `k = 4` are unambiguous enough that both voting schemes reach the
 # same decision. The low CV standard deviation (0.006) confirms the result is
 # stable across all five folds, not a lucky split.
+
+# %% [markdown]
+# ## Ablation Study: Effect of Feature Standardisation
+#
+# To quantify the contribution of feature scaling, we repeat the full
+# cross-validation hyperparameter search and test-set evaluation for both
+# methods on **unscaled** features. All other settings are identical: same
+# random seed, same stratified 80/20 split, same 5-fold CV, same k range.
+# The comparison isolates scaling as the single variable.
+
+# %%
+X_raw = np.load("../data/X.npy")
+y_raw = np.load("../data/y.npy")
+
+X_train_raw, X_test_raw, y_train_raw, y_test_raw = stratified_train_test_split(
+    X_raw, y_raw, test_size=0.2, random_seed=42, verbose=False
+)
+
+k_values = range(1, 21)
+
+cv_knn_unscaled  = cross_validate(X_raw, y_raw, k_values,
+                                   method=knn_predict,
+                                   n_folds=5, random_seed=42, verbose=False)
+cv_wknn_unscaled = cross_validate(X_raw, y_raw, k_values,
+                                   method=weighted_knn_predict,
+                                   n_folds=5, random_seed=42, verbose=False)
+
+
+def best_k(cv_results, round_decimals=6):
+    """Return (optimal_k, mean_cv_accuracy): smallest k among ties at peak accuracy."""
+    candidates = [(k, v["mean_accuracy"]) for k, v in cv_results.items()]
+    best_acc   = max(round(acc, round_decimals) for _, acc in candidates)
+    tied       = [(k, acc) for k, acc in candidates
+                  if round(acc, round_decimals) == best_acc]
+    return min(tied, key=lambda t: t[0])
+
+
+opt_k_knn_unscaled,  acc_cv_knn_unscaled  = best_k(cv_knn_unscaled)
+opt_k_wknn_unscaled, acc_cv_wknn_unscaled = best_k(cv_wknn_unscaled)
+
+y_pred_knn_unscaled  = knn_predict(X_train_raw, y_train_raw,
+                                    X_test_raw, k=opt_k_knn_unscaled)
+y_pred_wknn_unscaled = weighted_knn_predict(X_train_raw, y_train_raw,
+                                             X_test_raw, k=opt_k_wknn_unscaled)
+
+acc_test_knn_unscaled  = float(np.mean(y_pred_knn_unscaled  == y_test_raw))
+acc_test_wknn_unscaled = float(np.mean(y_pred_wknn_unscaled == y_test_raw))
+
+print(f"Unscaled — kNN:          optimal k={opt_k_knn_unscaled},  "
+      f"CV acc={acc_cv_knn_unscaled:.4f},  test acc={acc_test_knn_unscaled:.4f}")
+print(f"Unscaled — Weighted kNN: optimal k={opt_k_wknn_unscaled}, "
+      f"CV acc={acc_cv_wknn_unscaled:.4f},  test acc={acc_test_wknn_unscaled:.4f}")
+
+# %%
+ablation_df = pd.DataFrame([
+    {
+        "method":        "kNN",
+        "setting":       "scaled",
+        "optimal_k":     k_knn,
+        "cv_accuracy":   round(float(optimal_df[optimal_df["method"] == "knn"]
+                                     ["mean_accuracy"].values[0]), 4),
+        "test_accuracy": round(acc_knn, 4),
+    },
+    {
+        "method":        "kNN",
+        "setting":       "unscaled",
+        "optimal_k":     opt_k_knn_unscaled,
+        "cv_accuracy":   round(acc_cv_knn_unscaled, 4),
+        "test_accuracy": round(acc_test_knn_unscaled, 4),
+    },
+    {
+        "method":        "Weighted kNN",
+        "setting":       "scaled",
+        "optimal_k":     k_wknn,
+        "cv_accuracy":   round(float(optimal_df[optimal_df["method"] == "weighted_knn"]
+                                     ["mean_accuracy"].values[0]), 4),
+        "test_accuracy": round(acc_wknn, 4),
+    },
+    {
+        "method":        "Weighted kNN",
+        "setting":       "unscaled",
+        "optimal_k":     opt_k_wknn_unscaled,
+        "cv_accuracy":   round(acc_cv_wknn_unscaled, 4),
+        "test_accuracy": round(acc_test_wknn_unscaled, 4),
+    },
+])
+
+ablation_df.set_index(["method", "setting"])
