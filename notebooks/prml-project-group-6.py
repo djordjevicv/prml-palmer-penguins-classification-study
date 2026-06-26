@@ -140,10 +140,7 @@ print(f"\nImbalance ratio (largest/smallest class): {imbalance_ratio:.2f}")
 
 
 # %% [markdown]
-# **Note on class imbalance.** The dataset shows moderate class imbalance — Adelie (146 samples) has roughly 2.15× more samples than Chinstrap (68 samples), with Gentoo (119 samples) in between. This is accounted for during model evaluation, where overall accuracy alone may be misleading and per-class metrics (e.g., precision/recall) are also reported.
-
-# %% [markdown]
-# ### Correlation Heatmap
+# ### Feature Correlations
 #
 # Pairwise Pearson correlations among the four features identify redundant
 # measurements and hint at what variance the first principal component will
@@ -169,9 +166,6 @@ print(f"Strongest correlation: {strongest[0]} vs {strongest[1]}"
       f"  (r = {corr_df.loc[strongest]:.2f})")
 
 corr_df
-
-# %% [markdown]
-# **Interpretation.** The strongest correlation is between flipper_length_mm and body_mass_g (r = 0.87), indicating that larger-bodied penguins tend to have proportionally longer flippers. This strong positive relationship suggests these two features carry overlapping information, which is consistent with the high variance explained by the first principal component in the PCA projection below.
 
 # %% [markdown]
 # **Feature distributions by species.** We use overlapping histograms for each of the four features, split by species, to see how much the distributions overlap or separate — features with clearly separated distributions are likely to be more informative for classification.
@@ -486,9 +480,8 @@ plt.savefig("../figures/confusion_matrices.png", dpi=150)
 plt.show()
 
 # %% [markdown]
-# Both confusion matrices are identical: both methods correctly classify all 67
-# test points at `k = 4`. The diagonal entries confirm perfect per-class recall
-# for all three species.
+# The diagonal entries are fully populated: perfect per-class recall for all
+# three species.
 
 # %% [markdown]
 # ### Decision Boundaries on PCA Projection
